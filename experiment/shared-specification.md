@@ -1,12 +1,4 @@
-# A: one-shot
-
-## Original prompt status
-
-Pending: the exact user prompt and any follow-up instructions have not been recovered from the repository. This file is not a reconstructed prompt.
-
-The repository records one implementation commit covering both target files.
-
-## Recovered shared task specification
+# Shared task specification
 
 The following is a verbatim copy of `SPEC.md` from frozen template commit `ef7400092243881f6c5f3464fc99518a8bb00075`. This is shared task context, not evidence of the complete prompt delivered to either arm. The original specification ends inside a Python code block; the outer fence below preserves those bytes as text.
 

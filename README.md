@@ -1,8 +1,8 @@
 # AI coding cost experiment
 
-This repository contains code snapshots and prompts from the experiment described in the CyberKoi article. It is intended for implementation comparison rather than as a standalone runnable application.
+This repository contains code snapshots and workflow documentation from the experiment described in the CyberKoi article. It is intended for implementation comparison rather than as a standalone runnable application.
 
-**Draft status:** exact workflow prompts and the article URL are pending. The prompt files currently contain recovered shared task context, clearly distinguished from the missing original prompts.
+**Draft status:** the article URL is pending. The exact original prompts and gate instructions were not preserved and are not reconstructed. See [the experiment workflows](experiment/workflow.md) and [the recovered shared specification](experiment/shared-specification.md).
 
 ## Hypothesis
 
@@ -10,10 +10,10 @@ Proposed hypothesis, pending confirmation against the article: structuring the s
 
 ## Workflows and provenance
 
-Both workflows begin with frozen template `ef7400092243881f6c5f3464fc99518a8bb00075`, whose two target modules are stubs.
+Both workflows used the same full specification and differed in how implementation work was staged. Both begin with frozen template `ef7400092243881f6c5f3464fc99518a8bb00075`, whose two target modules are stubs.
 
-- **A, one-shot:** `b8c61cb9d8886d7849054c0f3205769419905845` changes both target modules in one commit. See [task context and prompt status](prompts/one-shot.md).
-- **B, test-gated:** milestone 1 `4676a15` changes the vector retriever; milestone 2 `43ee859` changes the document adapter. The exported B files are the final milestone snapshot. See [task context and prompt status](prompts/test-gated.md). Exact prompts, gate commands, retry history, and underlying gate logs remain unavailable; the final acceptance-test totals below are author-reported.
+- **A, one-shot:** `b8c61cb9d8886d7849054c0f3205769419905845` changes both target modules in one commit. See [the one-shot workflow](experiment/workflow.md#a-one-shot).
+- **B, test-gated:** milestone 1 `4676a15` changes the vector retriever; milestone 2 `43ee859` changes the document adapter. The exported B files are the final milestone snapshot. See [the test-gated workflow](experiment/workflow.md#b-test-gated). Exact prompts, gate commands, retry history, and underlying gate logs remain unavailable; the final acceptance-test totals below are author-reported.
 
 The four Python files are byte-for-byte exports of their original Git blobs. They reference interfaces and third-party packages from the original application, which are deliberately omitted. No imports or behavior were changed for this comparison. Original Git history is not included.
 

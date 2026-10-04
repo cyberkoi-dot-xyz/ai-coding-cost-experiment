@@ -2,7 +2,7 @@
 
 This repository contains code snapshots and workflow documentation from the experiment described in the CyberKoi article, plus a reusable prompt for coding agents working on multi-component tasks. The snapshots support implementation comparison rather than serving as a standalone runnable application.
 
-**Draft status:** the article URL is pending. The exact original prompts and gate instructions were not preserved and are not reconstructed. See [the experiment workflows](experiment/workflow.md) and [the recovered shared specification](experiment/shared-specification.md).
+The exact original prompts and gate instructions were not preserved and are not reconstructed. See [the experiment workflows](experiment/workflow.md) and [the recovered shared specification](experiment/shared-specification.md).
 
 ## Hypothesis
 
@@ -79,4 +79,4 @@ MIT, copyright 2026 CyberKoi. See [LICENSE](LICENSE).
 
 ## CyberKoi article
 
-**Article URL placeholder:** `[CyberKoi article](PRODUCTION_ARTICLE_URL_PENDING)` — replace with the production URL after the article is published.
+[CyberKoi article](https://cyberkoi.xyz/blog/reducing-ai-coding-cost)

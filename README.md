@@ -1,12 +1,15 @@
 # AI coding cost experiment
 
-This repository contains code snapshots and workflow documentation from the experiment described in the CyberKoi article. It is intended for implementation comparison rather than as a standalone runnable application.
+This repository contains code snapshots and workflow documentation from the experiment described in the CyberKoi article, plus a reusable prompt for coding agents working on multi-component tasks. The snapshots support implementation comparison rather than serving as a standalone runnable application.
 
 **Draft status:** the article URL is pending. The exact original prompts and gate instructions were not preserved and are not reconstructed. See [the experiment workflows](experiment/workflow.md) and [the recovered shared specification](experiment/shared-specification.md).
 
 ## Hypothesis
 
-Proposed hypothesis, pending confirmation against the article: structuring the same coding task into test-gated milestones can reduce total AI coding cost while maintaining correctness compared with a one-shot task. Code differences alone cannot establish this claim.
+Structuring the same coding task into test-gated milestones can reduce AI coding
+cost while maintaining correctness compared with implementing the task in one
+shot. This experiment tests that hypothesis; code differences alone cannot
+establish it.
 
 ## Workflows and provenance
 
@@ -56,6 +59,19 @@ Existing retrieval reports predate these implementation commits in the frozen te
 ## Limitations
 
 This is one pair of code snapshots. Static inspection identifies behavioral differences but does not independently verify the reported measurements or establish that task structure caused a difference. Gate execution and complete model-session context cannot be inferred from commit names. Dependencies, tests, datasets, local indexes, and application modules are outside this comparison's scope.
+
+## Reusable Coding-Agent Prompt
+
+The experiment motivated a [reusable test-gated coding prompt](templates/test-gated-coding-prompt.md) for Codex and other coding agents. Give the agent the full architecture, but only one implementation boundary at a time.
+
+Copy the prompt, fill in the project goal, component interfaces, constraints, acceptance criteria, and component test gates, then select an execution mode before starting:
+
+- **Interactive:** Stop after each passing component gate and wait for explicit approval to proceed.
+- **Autonomous:** Record each passing checkpoint and automatically proceed to the next predefined component, then run final integration after all component gates pass.
+
+Both modes stop if a gate fails or cannot run, the specification is ambiguous, or proceeding requires expanding the approved scope. The prompt keeps implementation and active context focused on the current component, preserves tested interfaces, and discourages rereading unrelated repository areas without new evidence that they are needed.
+
+The author-reported results from this experiment showed lower token usage and estimated token cost for the test-gated workflow. Results may vary by task; this comparison does not establish that the reusable prompt or either execution mode universally reduces cost. The reusable prompt is a practical guide derived from the experiment, not a reconstruction of its original instructions.
 
 ## License
 

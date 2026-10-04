@@ -1,0 +1,427 @@
+--- implementations/one-shot/vector_retriever.py
++++ implementations/test-gated/vector_retriever.py
+@@ -1,107 +1,170 @@
+-"""Query-only dense retrieval from an existing Qdrant collection."""
++"""Dense query retrieval against an existing Qdrant collection."""
++
++from __future__ import annotations
++
++import asyncio
+ from datetime import datetime, timezone
+-from qdrant_client.models import DatetimeRange, FieldCondition, Filter, MatchAny, MatchValue, Range
++
++from qdrant_client.models import (
++    DatetimeRange, FieldCondition, Filter, MatchAny, MatchValue, Range,
++)
++
+ from rag.types import DocType, RetrievedChunk, RetrieverSource
+ 
+ 
+ class VectorRetriever:
+-    def __init__(self, qdrant_client, embedding_client, collection_name: str, embedding_model: str):
++    """Embed only incoming queries; preserve Qdrant's ranking and raw scores."""
++
++    def __init__(
++        self, qdrant_client, embedding_client,
++        collection_name: str, embedding_model: str,
++    ):
+         self._qdrant = qdrant_client
+         self._embedding_client = embedding_client
+-        self._collection_name = collection_name
+-        self._embedding_model = embedding_model
+-        self._dimension = None
++        self.collection_name = collection_name
++        self.embedding_model = embedding_model
++        self._dimension: int | None = None
++        self._dimension_lock = asyncio.Lock()
+ 
+-    async def _get_dimension(self):
+-        if self._dimension is None:
+-            collection = await self._qdrant.get_collection(self._collection_name)
+-            vectors = collection.config.params.vectors
+-            if not isinstance(vectors, dict) or 'dense' not in vectors:
+-                raise ValueError('Collection has no named dense vector')
+-            size = vectors['dense'].size
+-            if not isinstance(size, int) or size < 1:
+-                raise ValueError('Dense vector dimension must be positive')
+-            self._dimension = size
+-        return self._dimension
++    async def retrieve(
++        self, query: str, top_k: int = 20, filters: dict | None = None,
++    ) -> list[RetrievedChunk]:
++        self._validate_k(top_k)
++        self._validate_query(query)
++        query_filter = self._build_filter(filters)
++        dimension = await self._get_dimension()
++        response = await self._embedding_client.embeddings.create(
++            model=self.embedding_model, input=query, dimensions=dimension,
++        )
++        vectors = self._embedding_vectors(response, 1, dimension)
++        return await self._search(vectors[0], top_k, query_filter)
++
++    async def retrieve_batch(
++        self, queries: list[str], top_k: int = 20, filters: dict | None = None,
++    ) -> list[list[RetrievedChunk]]:
++        self._validate_k(top_k)
++        if not isinstance(queries, list):
++            raise ValueError("queries must be a list of strings")
++        for query in queries:
++            self._validate_query(query)
++        query_filter = self._build_filter(filters)
++        if not queries:
++            return []
++        dimension = await self._get_dimension()
++        response = await self._embedding_client.embeddings.create(
++            model=self.embedding_model, input=queries, dimensions=dimension,
++        )
++        # Validate every vector before starting any searches.
++        vectors = self._embedding_vectors(response, len(queries), dimension)
++        return await asyncio.gather(*(
++            self._search(vector, top_k, query_filter) for vector in vectors
++        ))
+ 
+     @staticmethod
+-    def _build_filter(filters):
+-        if not filters:
+-            return None
+-        conditions = []
+-        for key, value in filters.items():
+-            if isinstance(value, dict):
+-                if key == 'created_at':
+-                    bounds = {}
+-                    for operator, bound in value.items():
+-                        date = datetime.fromisoformat(bound.replace('Z', '+00:00')) if isinstance(bound, str) else bound
+-                        if date.tzinfo is None:
+-                            date = date.replace(tzinfo=timezone.utc)
+-                        bounds[operator] = date
+-                    interval = DatetimeRange(**bounds)
+-                else:
+-                    interval = Range(**value)
+-                conditions.append(FieldCondition(key=key, range=interval))
+-            elif isinstance(value, list):
+-                conditions.append(FieldCondition(key=key, match=MatchAny(any=value)))
+-            else:
+-                conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
+-        return Filter(must=conditions)
++    def _validate_k(top_k):
++        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
++            raise ValueError("top_k must be a positive integer")
+ 
+     @staticmethod
+-    def _chunks(points):
+-        chunks = []
+-        for rank, point in enumerate(points, 1):
+-            payload = dict(point.payload or {})
+-            text = payload.pop('text', '') or ''
+-            raw_type = payload.pop('doc_type', None)
+-            try:
+-                doc_type = DocType(raw_type)
+-            except (ValueError, TypeError):
+-                doc_type = DocType.UNKNOWN
+-            values = {key: payload.pop(key, None) for key in
+-                      ('brand', 'campaign_id', 'channel', 'source_url', 'created_at')}
+-            chunks.append(RetrievedChunk(id=str(point.id), text=text, score=point.score,
+-                          rank=rank, source=RetrieverSource.VECTOR, doc_type=doc_type,
+-                          metadata=payload, **values))
+-        return chunks
++    def _validate_query(query):
++        if not isinstance(query, str) or not query.strip():
++            raise ValueError("query must be a non-empty string")
++
++    async def _get_dimension(self) -> int:
++        async with self._dimension_lock:
++            if self._dimension is None:
++                collection = await self._qdrant.get_collection(self.collection_name)
++                vectors = collection.config.params.vectors
++                if not isinstance(vectors, dict) or "dense" not in vectors:
++                    raise ValueError("Collection has no named dense vector")
++                dimension = vectors["dense"].size
++                if (isinstance(dimension, bool)
++                        or not isinstance(dimension, int) or dimension < 1):
++                    raise ValueError("Dense vector dimension must be a positive integer")
++                self._dimension = dimension
++            return self._dimension
++
++    @staticmethod
++    def _embedding_vectors(response, count, dimension):
++        entries = list(response.data)
++        if len(entries) != count:
++            raise ValueError(f"Expected {count} query embeddings, got {len(entries)}")
++        # OpenAI supplies indices; lightweight injected clients may omit them.
++        indices = [getattr(entry, "index", None) for entry in entries]
++        if any(index is not None for index in indices):
++            if any(type(index) is not int for index in indices) or sorted(indices) != list(range(count)):
++                raise ValueError("Embedding indices must identify each input query once")
++            entries.sort(key=lambda entry: entry.index)
++        vectors = [entry.embedding for entry in entries]
++        for vector in vectors:
++            if len(vector) != dimension:
++                raise ValueError(
++                    f"Expected {dimension} embedding dimensions, got {len(vector)}"
++                )
++        return vectors
+ 
+     async def _search(self, vector, top_k, query_filter):
+         response = await self._qdrant.query_points(
+-            collection_name=self._collection_name, query=vector, using='dense',
+-            query_filter=query_filter, limit=top_k, with_payload=True)
+-        return self._chunks(response.points)
++            collection_name=self.collection_name, query=vector, using="dense",
++            query_filter=query_filter, limit=top_k, with_payload=True,
++        )
++        return [self._to_chunk(point, rank)
++                for rank, point in enumerate(response.points, start=1)]
+ 
+-    async def _embed(self, inputs, count):
+-        dimension = await self._get_dimension()
+-        response = await self._embedding_client.embeddings.create(
+-            model=self._embedding_model, input=inputs, dimensions=dimension)
+-        if len(response.data) != count:
+-            raise ValueError(f'Expected {count} query embeddings')
+-        data = list(response.data)
+-        if all(isinstance(getattr(item, 'index', None), int) for item in data):
+-            data.sort(key=lambda item: item.index)
+-            if [item.index for item in data] != list(range(count)):
+-                raise ValueError('Invalid query embedding indices')
+-        vectors = [item.embedding for item in data]
+-        for vector in vectors:
+-            if len(vector) != dimension:
+-                raise ValueError(f'Expected {dimension} embedding dimensions, got {len(vector)}')
+-        return vectors
++    @staticmethod
++    def _build_filter(filters: dict | None) -> Filter | None:
++        if filters is None:
++            return None
++        if not isinstance(filters, dict):
++            raise ValueError("filters must be a dictionary")
++        conditions = []
++        for key, value in filters.items():
++            if not isinstance(key, str) or not key:
++                raise ValueError("Filter keys must be non-empty strings")
++            if isinstance(value, (str, bool, int)):
++                condition = FieldCondition(key=key, match=MatchValue(value=value))
++            elif isinstance(value, list):
++                if not value or not (
++                    all(isinstance(item, str) for item in value)
++                    or all(type(item) is int for item in value)
++                ):
++                    raise ValueError("Membership filters require strings or integers of one type")
++                condition = FieldCondition(key=key, match=MatchAny(any=value))
++            elif isinstance(value, dict):
++                if not value or set(value) - {"gt", "gte", "lt", "lte"}:
++                    raise ValueError("Range filters support only gt, gte, lt, and lte")
++                if key == "created_at" or all(isinstance(bound, (str, datetime)) for bound in value.values()):
++                    bounds = {}
++                    for operator, bound in value.items():
++                        if isinstance(bound, str):
++                            bound = datetime.fromisoformat(bound.replace("Z", "+00:00"))
++                        if not isinstance(bound, datetime):
++                            raise ValueError("Datetime range bounds must be ISO dates or datetimes")
++                        bounds[operator] = bound if bound.tzinfo else bound.replace(tzinfo=timezone.utc)
++                    range_value = DatetimeRange(**bounds)
++                else:
++                    if not all(type(bound) in (int, float) for bound in value.values()):
++                        raise ValueError("Numeric range bounds must be numbers")
++                    range_value = Range(**value)
++                condition = FieldCondition(key=key, range=range_value)
++            else:
++                raise ValueError(f"Unsupported filter value for {key}")
++            conditions.append(condition)
++        return Filter(must=conditions) if conditions else None
+ 
+-    async def retrieve(self, query: str, top_k: int = 20, filters: dict | None = None) -> list[RetrievedChunk]:
+-        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+-            raise ValueError('top_k must be a positive integer')
+-        query_filter = self._build_filter(filters)
+-        vectors = await self._embed(query, 1)
+-        return await self._search(vectors[0], top_k, query_filter)
+-
+-    async def retrieve_batch(self, queries: list[str], top_k: int = 20,
+-                             filters: dict | None = None) -> list[list[RetrievedChunk]]:
+-        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+-            raise ValueError('top_k must be a positive integer')
+-        if not queries:
+-            return []
+-        query_filter = self._build_filter(filters)
+-        vectors = await self._embed(queries, len(queries))
+-        return [await self._search(vector, top_k, query_filter) for vector in vectors]
++    @staticmethod
++    def _to_chunk(point, rank: int) -> RetrievedChunk:
++        payload = dict(point.payload or {})
++        doc_type = payload.pop("doc_type", DocType.UNKNOWN)
++        try:
++            doc_type = DocType(doc_type)
++        except (ValueError, TypeError):
++            doc_type = DocType.UNKNOWN
++        fields = {key: payload.pop(key, None) for key in (
++            "brand", "campaign_id", "channel", "source_url", "created_at",
++        )}
++        return RetrievedChunk(
++            id=str(point.id), text=payload.pop("text", "") or "",
++            score=point.score, rank=rank, source=RetrieverSource.VECTOR,
++            doc_type=doc_type, metadata=payload, **fields,
++        )
+--- implementations/one-shot/document_adapter.py
++++ implementations/test-gated/document_adapter.py
+@@ -1,78 +1,122 @@
+-"""Adapt asynchronous chunk retrieval to synchronous document evaluation."""
++"""Expose ranked unique documents through the synchronous evaluation boundary."""
++
++from __future__ import annotations
++
+ import asyncio
+ from dataclasses import fields
++
+ from rag.retrieval.types import RetrievalHit
+ from rag.types import RetrievedChunk
+ 
+ 
+ def collapse_documents(chunks: list[RetrievedChunk]) -> list[RetrievalHit]:
+-    """Keep the first chunk per document without changing backend order."""
++    """Keep the first chunk of each document in the supplied backend order.
++
++    Document IDs come from metadata, falling back to source_url for absent or
++    blank IDs. Chunk IDs are never used as document identities. Returned hits
++    retain chunk ranks; metadata also records contiguous document positions.
++    """
+     hits = []
+     seen = set()
+-    for position, chunk in enumerate(chunks, 1):
+-        document_id = chunk.metadata.get('document_id')
+-        if document_id is None or document_id == '':
++    for position, chunk in enumerate(chunks, start=1):
++        document_id = chunk.metadata.get("document_id")
++        if document_id is None or (isinstance(document_id, str) and not document_id.strip()):
+             document_id = chunk.source_url
+         if not isinstance(document_id, str) or not document_id.strip():
+-            raise ValueError(f'Chunk {chunk.id} requires a valid document_id or source_url')
++            raise ValueError(
++                f"Chunk {chunk.id} needs a valid document_id or source_url"
++            )
+         if document_id in seen:
+             continue
+         seen.add(document_id)
++        chunk_rank = chunk.rank if chunk.rank is not None else position
++        metadata = dict(chunk.metadata)
++        metadata.update(
++            evaluation_chunk_id=chunk.id,
++            evaluation_chunk_rank=chunk_rank,
++            evaluation_document_rank=len(hits) + 1,
++        )
+         values = {field.name: getattr(chunk, field.name) for field in fields(RetrievedChunk)}
+-        rank = chunk.rank if chunk.rank is not None else position
+-        metadata = dict(chunk.metadata)
+-        metadata.update(evaluation_chunk_id=chunk.id, evaluation_chunk_rank=rank,
+-                        evaluation_document_rank=len(hits) + 1)
+-        values.update(id=document_id, rank=rank, metadata=metadata)
++        values.update(id=document_id, rank=chunk_rank, metadata=metadata)
+         hits.append(RetrievalHit(**values))
+     return hits
+ 
+ 
+ class DocumentRetrievalAdapter:
+-    """Reuse one event loop across searches; injected clients remain caller-owned."""
+-    def __init__(self, retriever, chunk_count: int | None = None, filters: dict | None = None):
+-        if chunk_count is not None and (not isinstance(chunk_count, int)
+-                                       or isinstance(chunk_count, bool) or chunk_count < 0):
+-            raise ValueError('chunk_count must be a nonnegative integer')
++    """Retrieve progressively deeper chunk rankings for document evaluation.
++
++    This adapter owns its reusable event-loop runner. Injected retrievers and
++    clients remain owned by the caller; client-owning subclasses can close
++    their resources using this runner before closing the adapter.
++    """
++
++    def __init__(self, retriever, chunk_count: int | None = None):
++        if chunk_count is not None and (type(chunk_count) is not int or chunk_count < 0):
++            raise ValueError("chunk_count must be a non-negative integer or None")
+         self._retriever = retriever
+         self.chunk_count = chunk_count
+-        self.filters = filters
+         self._runner = asyncio.Runner()
+-        self.last_search_stats = {}
++        self._adapter_closed = False
++        self.last_search_stats = self._empty_stats()
++
++    @staticmethod
++    def _empty_stats():
++        return {
++            "chunks_retrieved": 0,
++            "unique_documents": 0,
++            "documents_returned": 0,
++            "total_chunks_received": 0,
++            "chunk_limits": [],
++            "exhausted": False,
++        }
+ 
+     def search(self, query: str, k: int) -> list[RetrievalHit]:
+-        self.last_search_stats = {
+-            'chunks_retrieved': 0, 'unique_documents': 0, 'documents_returned': 0,
+-            'total_chunks_received': 0, 'chunk_limits': [], 'exhausted': False}
+-        if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+-            raise ValueError('k must be a positive integer')
++        self.last_search_stats = self._empty_stats()
++        if type(k) is not int or k < 1:
++            raise ValueError("k must be a positive integer")
++        if self._adapter_closed:
++            raise RuntimeError("DocumentRetrievalAdapter is closed")
++        if self.chunk_count == 0:
++            self.last_search_stats["exhausted"] = True
++            return []
+         return self._runner.run(self._search(query, k))
+ 
+-    async def _search(self, query, k):
++    async def _search(self, query: str, k: int) -> list[RetrievalHit]:
++        limit = min(k, self.chunk_count) if self.chunk_count is not None else k
+         stats = self.last_search_stats
+-        if self.chunk_count == 0:
+-            stats['exhausted'] = True
+-            return []
+-        limit = min(k, self.chunk_count) if self.chunk_count is not None else k
+         while True:
+-            stats['chunk_limits'].append(limit)
+-            chunks = await self._retriever.retrieve(query, top_k=limit, filters=self.filters)
+-            hits = collapse_documents(chunks)
+-            exhausted = len(chunks) < limit or (self.chunk_count is not None and limit >= self.chunk_count)
+-            stats.update(chunks_retrieved=len(chunks), unique_documents=len(hits),
+-                         total_chunks_received=stats['total_chunks_received'] + len(chunks),
+-                         exhausted=exhausted)
+-            if len(hits) >= k or exhausted:
+-                stats['documents_returned'] = min(k, len(hits))
+-                return hits[:k]
++            stats["chunk_limits"].append(limit)
++            chunks = await self._retriever.retrieve(query, top_k=limit, filters=None)
++            stats["total_chunks_received"] += len(chunks)
++            # Replace the entire ranking on expansion: approximate search may
++            # return a changed prefix, so merging older responses is incorrect.
++            documents = collapse_documents(chunks)
++            exhausted = len(chunks) < limit or (
++                self.chunk_count is not None and limit >= self.chunk_count
++            )
++            stats.update(
++                chunks_retrieved=len(chunks),
++                unique_documents=len(documents),
++                exhausted=exhausted,
++            )
++            if len(documents) >= k or exhausted:
++                results = documents[:k]
++                stats["documents_returned"] = len(results)
++                return results
+             limit *= 2
+             if self.chunk_count is not None:
+                 limit = min(limit, self.chunk_count)
+ 
+     def close(self):
+-        self._runner.close()
++        if not self._adapter_closed:
++            try:
++                self._runner.close()
++            finally:
++                self._adapter_closed = True
+ 
+     def __enter__(self):
++        if self._adapter_closed:
++            raise RuntimeError("DocumentRetrievalAdapter is closed")
+         return self
+ 
+     def __exit__(self, exc_type, exc_value, traceback):

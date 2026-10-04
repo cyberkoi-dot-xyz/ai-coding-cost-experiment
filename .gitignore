@@ -1,0 +1,27 @@
+# Credentials and local configuration
+.env
+.env.*
+*.pem
+*.key
+credentials*
+# Python and development artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+# Local data and runtime artifacts
+data/
+logs/
+outputs/
+*.log
+*.db
+*.sqlite*
+qdrant_storage/
+# OS files
+.DS_Store
